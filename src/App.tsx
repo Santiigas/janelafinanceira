@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { Header } from "./components/layout/Header";
 import { CategoryPills } from "./components/categories/CategoryPills";
 import { SalaryButton } from "./components/categories/SalaryButton";
@@ -13,9 +13,12 @@ import { SubscriptionsModal } from "./components/categories/Modals/Subscriptions
 import { InvestmentsModal } from "./components/categories/Modals/InvestmentsModal";
 import { LeisureModal } from "./components/categories/Modals/LeisureModal";
 import { CategoryLimitModal } from "./components/categories/Modals/CategoryLimitModal";
+import { AuthModal } from "./components/auth/AuthModal";
 
-// Libs & Storage
+// Libs, Storage & Supabase
 import { StorageService } from "./lib/storage";
+import { supabase, isSupabaseConfigured } from "./lib/supabase";
+import { SupabaseService } from "./lib/supabaseService";
 import {
   UserProfile,
   CategoryLimit,
@@ -35,11 +38,17 @@ import {
   calculateCreditCardExpenseForMonth,
 } from "./lib/calculations";
 import { getCurrentYearMonth } from "./lib/utils";
+import { Cloud, CloudCheck, Loader2 } from "lucide-react";
 
 export function App() {
   const currentMonth = getCurrentYearMonth();
 
-  // State
+  // Auth & Cloud State
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  // Financial Domain States
   const [profile, setProfile] = useState<UserProfile>(StorageService.getUserProfile());
   const [limits, setLimits] = useState<CategoryLimit[]>(StorageService.getCategoryLimits());
   const [incomes, setIncomes] = useState<Income[]>(StorageService.getIncomes());
@@ -55,32 +64,136 @@ export function App() {
   const [activeModal, setActiveModal] = useState<CategoryKey | "salary" | null>(null);
   const [limitModalCategory, setLimitModalCategory] = useState<CategoryKey | null>(null);
 
-  // Totais do mês atual por categoria para badges e tetos
+  // Função para carregar todos os dados do Supabase
+  const loadCloudData = useCallback(async (userId: string, userNameFallback?: string) => {
+    setIsSyncing(true);
+    try {
+      const [
+        cloudProfile,
+        cloudLimits,
+        cloudIncomes,
+        cloudFixed,
+        cloudCards,
+        cloudPurchases,
+        cloudSubs,
+        cloudInvs,
+        cloudLeisure,
+        cloudSim,
+      ] = await Promise.all([
+        SupabaseService.getProfile(userId),
+        SupabaseService.getCategoryLimits(userId),
+        SupabaseService.getIncomes(userId),
+        SupabaseService.getFixedExpenses(userId),
+        SupabaseService.getCreditCards(userId),
+        SupabaseService.getCardPurchases(userId),
+        SupabaseService.getSubscriptions(userId),
+        SupabaseService.getInvestments(userId),
+        SupabaseService.getLeisureExpenses(userId),
+        SupabaseService.getSimulation(userId),
+      ]);
+
+      if (cloudProfile) {
+        setProfile(cloudProfile);
+        StorageService.saveUserProfile(cloudProfile);
+      } else {
+        // Inicializa perfil no Supabase se for o primeiro login
+        const newProf: UserProfile = {
+          id: userId,
+          name: userNameFallback || "Santiago",
+          salary: 0,
+          safetyMarginPercent: 25,
+        };
+        await SupabaseService.upsertProfile(newProf);
+        setProfile(newProf);
+        StorageService.saveUserProfile(newProf);
+      }
+
+      if (cloudLimits.length > 0) setLimits(cloudLimits);
+      setIncomes(cloudIncomes);
+      setFixedExpenses(cloudFixed);
+      if (cloudCards.length > 0) setCreditCards(cloudCards);
+      setCardPurchases(cloudPurchases);
+      setSubscriptions(cloudSubs);
+      setInvestments(cloudInvs);
+      setLeisureExpenses(cloudLeisure);
+      if (cloudSim) setSimulation(cloudSim);
+    } catch (e) {
+      console.error("Erro ao sincronizar dados do Supabase:", e);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, []);
+
+  // Monitora sessão do Supabase ao iniciar
+  useEffect(() => {
+    if (!supabase) return;
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setCurrentUser(session.user);
+        loadCloudData(
+          session.user.id,
+          session.user.user_metadata?.name || session.user.email?.split("@")[0]
+        );
+      }
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        setCurrentUser(session.user);
+        loadCloudData(
+          session.user.id,
+          session.user.user_metadata?.name || session.user.email?.split("@")[0]
+        );
+      } else {
+        setCurrentUser(null);
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [loadCloudData]);
+
+  // Logout
+  const handleLogout = async () => {
+    if (supabase) {
+      await supabase.auth.signOut();
+    }
+    setCurrentUser(null);
+    setProfile(StorageService.getUserProfile());
+    setIncomes(StorageService.getIncomes());
+    setFixedExpenses(StorageService.getFixedExpenses());
+    setCreditCards(StorageService.getCreditCards());
+    setCardPurchases(StorageService.getCreditCardPurchases());
+    setSubscriptions(StorageService.getSubscriptions());
+    setInvestments(StorageService.getInvestments());
+    setLeisureExpenses(StorageService.getLeisureExpenses());
+    setSimulation(StorageService.getSimulatedPurchase());
+  };
+
+  // Totais do mês atual por categoria
   const categoryTotals = useMemo(() => {
-    // 1. Entradas
     const totalIncomes = incomes
       .filter((i) => i.yearMonth === currentMonth || i.isRecurring)
       .reduce((s, i) => s + i.amount, 0);
 
-    // 2. Despesas Fixas (com histórico e média)
     const totalFixed = fixedExpenses.reduce((s, exp) => {
       return s + calculateFixedExpenseForMonth(exp, currentMonth);
     }, 0);
 
-    // 3. Cartão de Crédito
     const totalCards = calculateCreditCardExpenseForMonth(cardPurchases, currentMonth);
 
-    // 4. Assinaturas
     const totalSubs = subscriptions
       .filter((s) => s.isActive)
       .reduce((s, sub) => s + sub.amount, 0);
 
-    // 5. Investimentos
     const totalInvs = investments
       .filter((i) => i.yearMonth === currentMonth)
       .reduce((s, i) => s + i.amount, 0);
 
-    // 6. Diversão
     const totalLeisure = leisureExpenses
       .filter((l) => l.yearMonth === currentMonth)
       .reduce((s, l) => s + l.amount, 0);
@@ -109,113 +222,186 @@ export function App() {
     );
   }, [profile, incomes, fixedExpenses, cardPurchases, subscriptions, leisureExpenses, simulation, currentMonth]);
 
-  // Handlers para Salvar e Atualizar
-  const handleSaveProfile = (updated: UserProfile) => {
+  // --- Handlers de Ação com Persistência em Nuvem ---
+
+  const handleSaveProfile = async (updated: UserProfile) => {
     setProfile(updated);
     StorageService.saveUserProfile(updated);
+    if (currentUser) {
+      await SupabaseService.upsertProfile({ ...updated, id: currentUser.id });
+    }
   };
 
-  const handleSaveLimit = (cat: CategoryKey, limit: number) => {
+  const handleSaveLimit = async (cat: CategoryKey, limit: number) => {
     StorageService.saveCategoryLimit(cat, limit);
     setLimits(StorageService.getCategoryLimits());
+    if (currentUser) {
+      await SupabaseService.saveCategoryLimit(currentUser.id, cat, limit);
+    }
   };
 
   // Fixed Expenses
-  const handleSaveFixedExpense = (exp: FixedExpense) => {
+  const handleSaveFixedExpense = async (exp: FixedExpense) => {
     StorageService.saveFixedExpense(exp);
     setFixedExpenses(StorageService.getFixedExpenses());
+    if (currentUser) {
+      await SupabaseService.saveFixedExpense(currentUser.id, exp);
+    }
   };
 
-  const handleDeleteFixedExpense = (id: string) => {
+  const handleDeleteFixedExpense = async (id: string) => {
     StorageService.deleteFixedExpense(id);
     setFixedExpenses(StorageService.getFixedExpenses());
+    if (currentUser) {
+      await SupabaseService.deleteFixedExpense(id);
+    }
   };
 
-  const handleUpdateFixedExpenseMonth = (id: string, month: string, amount: number) => {
+  const handleUpdateFixedExpenseMonth = async (id: string, month: string, amount: number) => {
     StorageService.updateFixedExpenseMonth(id, month, amount);
     setFixedExpenses(StorageService.getFixedExpenses());
+    if (currentUser) {
+      await SupabaseService.updateFixedExpenseMonth(currentUser.id, id, month, amount);
+    }
   };
 
   // Credit Cards
-  const handleSaveCard = (card: CreditCard) => {
+  const handleSaveCard = async (card: CreditCard) => {
     StorageService.saveCreditCard(card);
     setCreditCards(StorageService.getCreditCards());
+    if (currentUser) {
+      await SupabaseService.saveCreditCard(currentUser.id, card);
+    }
   };
 
-  const handleDeleteCard = (id: string) => {
+  const handleDeleteCard = async (id: string) => {
     StorageService.deleteCreditCard(id);
     setCreditCards(StorageService.getCreditCards());
+    if (currentUser) {
+      await SupabaseService.deleteCreditCard(id);
+    }
   };
 
-  const handleSaveCardPurchase = (purchase: CreditCardPurchase) => {
+  const handleSaveCardPurchase = async (purchase: CreditCardPurchase) => {
     StorageService.saveCreditCardPurchase(purchase);
     setCardPurchases(StorageService.getCreditCardPurchases());
+    if (currentUser) {
+      await SupabaseService.saveCardPurchase(currentUser.id, purchase);
+    }
   };
 
-  const handleDeleteCardPurchase = (id: string) => {
+  const handleDeleteCardPurchase = async (id: string) => {
     StorageService.deleteCreditCardPurchase(id);
     setCardPurchases(StorageService.getCreditCardPurchases());
+    if (currentUser) {
+      await SupabaseService.deleteCardPurchase(id);
+    }
   };
 
   // Subscriptions
-  const handleSaveSubscription = (sub: Subscription) => {
+  const handleSaveSubscription = async (sub: Subscription) => {
     StorageService.saveSubscription(sub);
     setSubscriptions(StorageService.getSubscriptions());
+    if (currentUser) {
+      await SupabaseService.saveSubscription(currentUser.id, sub);
+    }
   };
 
-  const handleToggleSubscription = (id: string) => {
+  const handleToggleSubscription = async (id: string) => {
     StorageService.toggleSubscription(id);
-    setSubscriptions(StorageService.getSubscriptions());
+    const updatedSubs = StorageService.getSubscriptions();
+    setSubscriptions(updatedSubs);
+    const sub = updatedSubs.find((s) => s.id === id);
+    if (currentUser && sub) {
+      await SupabaseService.saveSubscription(currentUser.id, sub);
+    }
   };
 
-  const handleDeleteSubscription = (id: string) => {
+  const handleDeleteSubscription = async (id: string) => {
     StorageService.deleteSubscription(id);
     setSubscriptions(StorageService.getSubscriptions());
+    if (currentUser) {
+      await SupabaseService.deleteSubscription(id);
+    }
   };
 
   // Incomes
-  const handleSaveIncome = (inc: Income) => {
+  const handleSaveIncome = async (inc: Income) => {
     StorageService.saveIncome(inc);
     setIncomes(StorageService.getIncomes());
+    if (currentUser) {
+      await SupabaseService.saveIncome(currentUser.id, inc);
+    }
   };
 
-  const handleDeleteIncome = (id: string) => {
+  const handleDeleteIncome = async (id: string) => {
     StorageService.deleteIncome(id);
     setIncomes(StorageService.getIncomes());
+    if (currentUser) {
+      await SupabaseService.deleteIncome(id);
+    }
   };
 
   // Investments
-  const handleSaveInvestment = (inv: Investment) => {
+  const handleSaveInvestment = async (inv: Investment) => {
     StorageService.saveInvestment(inv);
     setInvestments(StorageService.getInvestments());
+    if (currentUser) {
+      await SupabaseService.saveInvestment(currentUser.id, inv);
+    }
   };
 
-  const handleDeleteInvestment = (id: string) => {
+  const handleDeleteInvestment = async (id: string) => {
     StorageService.deleteInvestment(id);
     setInvestments(StorageService.getInvestments());
+    if (currentUser) {
+      await SupabaseService.deleteInvestment(id);
+    }
   };
 
   // Leisure
-  const handleSaveLeisure = (lei: LeisureExpense) => {
+  const handleSaveLeisure = async (lei: LeisureExpense) => {
     StorageService.saveLeisureExpense(lei);
     setLeisureExpenses(StorageService.getLeisureExpenses());
+    if (currentUser) {
+      await SupabaseService.saveLeisureExpense(currentUser.id, lei);
+    }
   };
 
-  const handleDeleteLeisure = (id: string) => {
+  const handleDeleteLeisure = async (id: string) => {
     StorageService.deleteLeisureExpense(id);
     setLeisureExpenses(StorageService.getLeisureExpenses());
+    if (currentUser) {
+      await SupabaseService.deleteLeisureExpense(id);
+    }
   };
 
   // Simulation
-  const handleSaveSimulation = (sim: SimulatedPurchase | null) => {
+  const handleSaveSimulation = async (sim: SimulatedPurchase | null) => {
     setSimulation(sim);
     StorageService.saveSimulatedPurchase(sim);
+    if (currentUser && sim) {
+      await SupabaseService.saveSimulation(currentUser.id, sim);
+    }
   };
 
   return (
     <div className="min-h-screen bg-[#f8fafc] text-slate-900 flex flex-col font-sans">
       {/* 1. Header Superior com Navegação e Boas-Vindas */}
-      <Header userName={profile.name || "SANTIAGO"} />
+      <Header
+        userName={profile.name || "Santiago"}
+        isLoggedIn={Boolean(currentUser)}
+        onOpenAuth={() => setIsAuthModalOpen(true)}
+        onLogout={handleLogout}
+      />
+
+      {/* Sync Status Banner */}
+      {isSyncing && (
+        <div className="bg-emerald-600 text-white text-xs font-bold py-1.5 px-4 text-center flex items-center justify-center gap-2 animate-in fade-in">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          <span>Sincronizando seus dados com o Supabase Cloud...</span>
+        </div>
+      )}
 
       {/* 2. Conteúdo Principal */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -225,7 +411,7 @@ export function App() {
             TELA DE LANÇAMENTOS E ANALISE FINANCEIRA
           </h1>
 
-          <div className="self-start sm:self-auto">
+          <div className="self-start sm:self-auto flex items-center gap-2">
             <SalaryButton
               salary={profile.salary}
               onClick={() => setActiveModal("salary")}
@@ -323,6 +509,15 @@ export function App() {
           limitModalCategory ? categoryTotals[limitModalCategory] || 0 : 0
         }
         onSaveLimit={handleSaveLimit}
+      />
+
+      {/* Modal de Autenticação Supabase */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onAuthSuccess={(userName) => {
+          setProfile((prev) => ({ ...prev, name: userName }));
+        }}
       />
     </div>
   );
