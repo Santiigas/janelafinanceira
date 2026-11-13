@@ -272,5 +272,9 @@ export const StorageService = {
   saveSimulatedPurchase(simulation: SimulatedPurchase | null): void {
     setToStorage(STORAGE_KEYS.SIMULATION, simulation);
   },
+
+  clearUserData(): void {
+    Object.values(STORAGE_KEYS).forEach((k) => localStorage.removeItem(k));
+  },
 };
 

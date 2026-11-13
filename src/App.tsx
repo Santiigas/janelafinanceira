@@ -3,6 +3,7 @@ import { Header } from "./components/layout/Header";
 import { CategoryPills } from "./components/categories/CategoryPills";
 import { SalaryButton } from "./components/categories/SalaryButton";
 import { OpportunityWindow } from "./components/opportunity/OpportunityWindow";
+import { HelpSection } from "./components/help/HelpSection";
 
 // Modals
 import { SalaryModal } from "./components/categories/Modals/SalaryModal";
@@ -14,6 +15,7 @@ import { InvestmentsModal } from "./components/categories/Modals/InvestmentsModa
 import { LeisureModal } from "./components/categories/Modals/LeisureModal";
 import { CategoryLimitModal } from "./components/categories/Modals/CategoryLimitModal";
 import { AuthModal } from "./components/auth/AuthModal";
+import { AuthScreen } from "./components/auth/AuthScreen";
 
 // Libs, Storage & Supabase
 import { StorageService } from "./lib/storage";
@@ -38,13 +40,14 @@ import {
   calculateCreditCardExpenseForMonth,
 } from "./lib/calculations";
 import { getCurrentYearMonth } from "./lib/utils";
-import { Cloud, CloudCheck, Loader2 } from "lucide-react";
+import { Cloud, CloudCheck, Loader2, Receipt, Compass } from "lucide-react";
 
 export function App() {
   const currentMonth = getCurrentYearMonth();
 
   // Auth & Cloud State
   const [currentUser, setCurrentUser] = useState<any>(null);
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
@@ -99,7 +102,7 @@ export function App() {
         // Inicializa perfil no Supabase se for o primeiro login
         const newProf: UserProfile = {
           id: userId,
-          name: userNameFallback || "Santiago",
+          name: userNameFallback || "Usuário",
           salary: 0,
           safetyMarginPercent: 25,
         };
@@ -126,17 +129,30 @@ export function App() {
 
   // Monitora sessão do Supabase ao iniciar
   useEffect(() => {
-    if (!supabase) return;
+    if (!supabase) {
+      setIsAuthChecking(false);
+      return;
+    }
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        setCurrentUser(session.user);
-        loadCloudData(
-          session.user.id,
-          session.user.user_metadata?.name || session.user.email?.split("@")[0]
-        );
-      }
-    });
+    supabase.auth
+      .getSession()
+      .then(({ data: { session } }) => {
+        if (session?.user) {
+          setCurrentUser(session.user);
+          loadCloudData(
+            session.user.id,
+            session.user.user_metadata?.name || session.user.email?.split("@")[0]
+          );
+        } else {
+          setCurrentUser(null);
+        }
+      })
+      .catch((err) => {
+        console.error("Erro ao verificar sessão inicial:", err);
+      })
+      .finally(() => {
+        setIsAuthChecking(false);
+      });
 
     const {
       data: { subscription },
@@ -162,16 +178,18 @@ export function App() {
     if (supabase) {
       await supabase.auth.signOut();
     }
+    StorageService.clearUserData();
     setCurrentUser(null);
     setProfile(StorageService.getUserProfile());
-    setIncomes(StorageService.getIncomes());
-    setFixedExpenses(StorageService.getFixedExpenses());
-    setCreditCards(StorageService.getCreditCards());
-    setCardPurchases(StorageService.getCreditCardPurchases());
-    setSubscriptions(StorageService.getSubscriptions());
-    setInvestments(StorageService.getInvestments());
-    setLeisureExpenses(StorageService.getLeisureExpenses());
-    setSimulation(StorageService.getSimulatedPurchase());
+    setLimits(StorageService.getCategoryLimits());
+    setIncomes([]);
+    setFixedExpenses([]);
+    setCreditCards([]);
+    setCardPurchases([]);
+    setSubscriptions([]);
+    setInvestments([]);
+    setLeisureExpenses([]);
+    setSimulation(null);
   };
 
   // Totais do mês atual por categoria
@@ -385,11 +403,58 @@ export function App() {
     }
   };
 
+  // 1. Tela de Carregamento / Verificação de Sessão Inicial
+  if (isAuthChecking) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-slate-100/90 via-[#f8fafc] to-slate-100 flex flex-col items-center justify-center p-4">
+        <div className="flex flex-col items-center gap-3">
+          <div className="bg-white px-5 py-3.5 rounded-3xl border border-slate-200/90 shadow-md flex items-center gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-white flex items-center justify-center shadow-xs">
+              <Compass className="w-5 h-5 text-emerald-400 stroke-[2.2] animate-pulse" />
+            </div>
+            <div className="flex flex-col text-left">
+              <div className="flex items-center gap-1.5">
+                <span className="font-black text-slate-900 text-lg tracking-tight leading-none">
+                  Janela<span className="text-emerald-600">Financeira</span>
+                </span>
+                <span className="text-[10px] font-black uppercase tracking-wider bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded border border-slate-200/90 leading-none">
+                  Preditiva
+                </span>
+              </div>
+              <span className="text-[10px] font-semibold text-slate-400 tracking-wide mt-1 leading-none">
+                Controle & Janela de Oportunidades
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 text-slate-500 text-xs font-semibold mt-2">
+            <Loader2 className="w-4 h-4 animate-spin text-emerald-600" />
+            <span>Verificando autenticação...</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. Se o usuário não estiver autenticado, exibe a Tela de Login e Cadastro Dedicada
+  if (!currentUser) {
+    return (
+      <AuthScreen
+        onAuthSuccess={(user) => {
+          setCurrentUser(user);
+          loadCloudData(
+            user.id,
+            user.user_metadata?.name || user.email?.split("@")[0]
+          );
+        }}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#f8fafc] text-slate-900 flex flex-col font-sans">
       {/* 1. Header Superior com Navegação e Boas-Vindas */}
       <Header
-        userName={profile.name || "Santiago"}
+        userName={profile.name || currentUser?.user_metadata?.name || currentUser?.email?.split("@")[0] || "Usuário"}
         isLoggedIn={Boolean(currentUser)}
         onOpenAuth={() => setIsAuthModalOpen(true)}
         onLogout={handleLogout}
@@ -404,35 +469,51 @@ export function App() {
       )}
 
       {/* 2. Conteúdo Principal */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* Título da Tela e Botão de Salário */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2">
-          <h1 className="text-2xl sm:text-3xl md:text-4xl font-black text-slate-900 tracking-tight uppercase">
-            TELA DE LANÇAMENTOS E ANALISE FINANCEIRA
-          </h1>
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-8">
+        {/* BLOCO 1: TELA DE LANÇAMENTOS E ANÁLISE FINANCEIRA */}
+        <section className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 sm:p-6 transition-all">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-slate-100">
+            <div>
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200/80 text-[11px] font-bold text-emerald-800 mb-2">
+                <Receipt className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Bloco 1 • Gestão & Lançamentos</span>
+              </div>
+              <h1 className="text-xl sm:text-2xl md:text-3xl font-black text-slate-900 tracking-tight">
+                Tela de Lançamentos e Análise Financeira
+              </h1>
+              <p className="text-xs sm:text-sm text-slate-500 mt-1">
+                Cadastre sua renda fixa, controle limites por categoria e gerencie suas despesas fixas e variáveis.
+              </p>
+            </div>
 
-          <div className="self-start sm:self-auto flex items-center gap-2">
-            <SalaryButton
-              salary={profile.salary}
-              onClick={() => setActiveModal("salary")}
+            <div className="self-start sm:self-auto shrink-0">
+              <SalaryButton
+                salary={profile.salary}
+                onClick={() => setActiveModal("salary")}
+              />
+            </div>
+          </div>
+
+          {/* 3. Botões de Lançamento / Categorias (Pills Modernizadas) */}
+          <div className="mt-4">
+            <CategoryPills
+              categoryTotals={categoryTotals}
+              limits={limits}
+              onOpenCategory={(cat) => setActiveModal(cat)}
+              onOpenLimitModal={(cat) => setLimitModalCategory(cat)}
             />
           </div>
-        </div>
+        </section>
 
-        {/* 3. Botões de Lançamento / Categorias (Pills) */}
-        <CategoryPills
-          categoryTotals={categoryTotals}
-          limits={limits}
-          onOpenCategory={(cat) => setActiveModal(cat)}
-          onOpenLimitModal={(cat) => setLimitModalCategory(cat)}
-        />
-
-        {/* 4. Janela de Oportunidades e Gráfico de Projeção */}
+        {/* BLOCO 2 & BLOCO 3: JANELA DE OPORTUNIDADES E GRÁFICO EM TEMPO REAL */}
         <OpportunityWindow
           simulation={simulation}
           onSaveSimulation={handleSaveSimulation}
           projections={projections}
         />
+
+        {/* SEÇÃO DE AJUDA & GUIA RÁPIDO */}
+        <HelpSection />
       </main>
 
       {/* 5. Modais de Cadastro e Edição */}
